@@ -38,7 +38,8 @@ import static zipkin.internal.Util.checkNotNull;
  * This collector polls a Kafka topic for messages that contain TBinaryProtocol big-endian encoded
  * lists of spans. These spans are pushed to a {@link AsyncSpanConsumer#accept span consumer}.
  *
- * <p>This collector remains a Kafka 0.8.x consumer, while Zipkin systems update to 0.9+.
+ * <p>This collector has been updated to use Kafka 0.10.x in line with the corresponding version upgrade in the zipkin
+ * Java reporter and Finagle integration modules.
  */
 public final class KafkaCollector implements CollectorComponent {
 
