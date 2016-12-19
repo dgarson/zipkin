@@ -34,5 +34,6 @@
   <modules>
     <module>scribe</module>
     <module>kafka</module>
+      <module>kafka010</module>
   </modules>
 </project>
