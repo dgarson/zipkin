@@ -1,5 +1,6 @@
 package zipkin.collector.kafka010;
 
+import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.stats.Avg;
@@ -20,15 +21,22 @@ public class KafkaConsumerProcessorMetrics {
 
     private static final Logger logger = LoggerFactory.getLogger(KafkaConsumerProcessorMetrics.class);
 
-    private static final char METRIC_NAME_SEPARATOR = '.';
-
-    private static final String SENSOR_PREFIX = "consumer-runner-%s";
-    private static final String CONSUMER_METRICS_GROUP = "consumer-metrics";
+    private static final Field METRICS_FIELD;
 
     // private non-final double
     private static final Field MIN_INITIAL_VALUE_FIELD;
 
     static {
+        Field metricsField;
+        try {
+            metricsField = KafkaConsumer.class.getDeclaredField("metrics");
+            metricsField.setAccessible(true);
+        } catch (Exception e) {
+            logger.error("Unable to make KafkaConsumer.metrics field accessible!", e);
+            metricsField = null;
+        }
+        METRICS_FIELD = metricsField;
+
         Field initialValueField;
         try {
             initialValueField = Min.class.getDeclaredField("initialValue");
@@ -39,6 +47,11 @@ public class KafkaConsumerProcessorMetrics {
         }
         MIN_INITIAL_VALUE_FIELD = initialValueField;
     }
+
+    private static final char METRIC_NAME_SEPARATOR = '.';
+
+    private static final String SENSOR_PREFIX = "consumer-runner-%s";
+    private static final String CONSUMER_METRICS_GROUP = "consumer-metrics";
 
     private final ConcurrentMap<String, Sensor> throwableToSensorMap = new ConcurrentHashMap<>();
     private final Sensor totalErrorSensor;
@@ -128,5 +141,20 @@ public class KafkaConsumerProcessorMetrics {
             }
         }
         return min;
+    }
+
+    /**
+     * Extracts the <tt>metrics</tt> field from the provided KafkaConsumer and wraps it in our own
+     * KafkaConsumerProcessorMetrics class, for use in this and associated Zipkin Kafka Collector classes
+     */
+    static KafkaConsumerProcessorMetrics forKafkaConsumer(KafkaConsumer<?, ?> kafkaConsumer,
+                                                                 String metricPrefix, boolean isBatch) {
+        try {
+            Metrics metrics = (Metrics) METRICS_FIELD.get(kafkaConsumer);
+            return new KafkaConsumerProcessorMetrics(metrics, metricPrefix, isBatch);
+        } catch (Exception e) {
+            throw new IllegalStateException(String.format("Unable to extract value from 'metrics' field in KafkaConsumer: %s",
+                    kafkaConsumer), e);
+        }
     }
 }

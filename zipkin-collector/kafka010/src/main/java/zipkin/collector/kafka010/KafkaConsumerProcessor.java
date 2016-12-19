@@ -10,6 +10,8 @@ import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.metrics.Metrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import zipkin.internal.Lazy;
+import zipkin.internal.LazyCloseable;
 import zipkin.internal.Nullable;
 
 import java.lang.reflect.Field;
@@ -40,15 +42,16 @@ public class KafkaConsumerProcessor implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger(KafkaConsumerProcessor.class);
 
-    private final KafkaConsumer<byte[], byte[]> kafkaConsumer;
+    private final LazyCloseable<KafkaConsumer<byte[], byte[]>> kafkaConsumer;
     private final Properties consumerProperties;
 
     private final long pollTimeoutMillis;
     private final boolean batchingEnabled;
     private final boolean autoCommitEnabled;
-    private final KafkaConsumerProcessorMetrics metrics;
+    private final Lazy<KafkaConsumerProcessorMetrics> metrics;
 
-    KafkaConsumerProcessor(KafkaConsumer<byte[], byte[]> kafkaConsumer, Properties consumerProperties) {
+    KafkaConsumerProcessor(final LazyCloseable<KafkaConsumer<byte[], byte[]>> kafkaConsumer,
+                           Properties consumerProperties) {
         this.kafkaConsumer = kafkaConsumer;
         this.consumerProperties = consumerProperties;
 
@@ -59,9 +62,16 @@ public class KafkaConsumerProcessor implements Runnable {
         this.autoCommitEnabled = Boolean.parseBoolean(
                 consumerProperties.getProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, DEFAULT_AUTO_COMMIT_CONFIG));
 
-        String metricPrefix = consumerProperties.getProperty(METRICS_PREFIX_PROPERTY);
-        this.metrics = new KafkaConsumerProcessorMetrics(getInternalMetrics(kafkaConsumer),
-                metricPrefix, batchingEnabled);
+        // make sure to defer construction of the KafkaConsumerProcessorMetrics to avoid eagerly connecting to Kafka
+        //      and eliminating any optimization introduced by using LazyCloseable's
+        final String metricPrefix = consumerProperties.getProperty(METRICS_PREFIX_PROPERTY);
+        this.metrics = new Lazy<KafkaConsumerProcessorMetrics>() {
+            @Override
+            public KafkaConsumerProcessorMetrics compute() {
+                return KafkaConsumerProcessorMetrics.forKafkaConsumer(kafkaConsumer.get(),
+                        metricPrefix, batchingEnabled);
+            }
+        };
     }
 
     protected void processMessages(List<byte[]> messages, OffsetCommitter offsetCommitter) {
@@ -80,12 +90,13 @@ public class KafkaConsumerProcessor implements Runnable {
     @Override
     public void run() {
         final String threadName = Thread.currentThread().getName();
-        final OffsetCommitter offsetCommitter = OffsetCommitter.Factory.committer(kafkaConsumer, autoCommitEnabled,
-                /*isAsync=*/batchingEnabled); // use async commits if we are batching consumed messages(?)
+        final OffsetCommitter offsetCommitter = OffsetCommitter.Factory.committer(kafkaConsumer.get(),
+                // use async commits if we are batching consumed messages(?)
+                autoCommitEnabled, /*isAsync=*/batchingEnabled);
         try {
             logger.debug("Iterate through messages in Thread={}", threadName);
             while (true) {
-                ConsumerRecords<byte[], byte[]> records = kafkaConsumer.poll(pollTimeoutMillis);
+                ConsumerRecords<byte[], byte[]> records = kafkaConsumer.get().poll(pollTimeoutMillis);
                 if (records.isEmpty()) {
                     continue;
                 }
@@ -140,7 +151,11 @@ public class KafkaConsumerProcessor implements Runnable {
             logger.error("Unhandled error in kafka consumer thread.", throwable);
         } finally {
             // if auto-commit is enabled, close() will commit the current offsets.
-            kafkaConsumer.close();
+            try {
+                kafkaConsumer.close();
+            } catch (Exception e) {
+                logger.error("Unable to shutdown parent consumer", e);
+            }
         }
     }
 
@@ -150,14 +165,14 @@ public class KafkaConsumerProcessor implements Runnable {
     public void shutdown() {
         // wakeup() will trigger a WakeupException in {@link org.apache.kafka.clients.consumer.KafkaConsumer#poll(long)}
         // and interrupt KafkaConsumer's active operation
-        kafkaConsumer.wakeup();
+        kafkaConsumer.get().wakeup();
     }
 
     private void onProcessingError(List<byte[]> messages, Throwable cause) {
-        metrics.recordTotalError();
+        metrics.get().recordTotalError();
         // We always record here. Otherwise it may be too late to do it after the switch block because
         // some cases re-throw the "throwable".
-        metrics.recordThrowable(cause);
+        metrics.get().recordThrowable(cause);
     }
 
     private void onProcessingCompleted(long elapsedMillis) {
